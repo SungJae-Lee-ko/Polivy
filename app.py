@@ -1,12 +1,16 @@
 """DC 자료 자동화 앱 — Streamlit 메인 엔트리포인트."""
 
+import io
 import json
 import logging
 import os
+import re
 import sys
+import time
 from pathlib import Path
 
 import streamlit as st
+from docx import Document
 
 # 프로젝트 루트를 sys.path에 추가
 sys.path.insert(0, str(Path(__file__).parent))
@@ -54,7 +58,7 @@ def _save_json(path: Path, data: dict) -> None:
 def _init_session_state() -> None:
     """Streamlit session state 초기화.
 
-    RAG 엔진, 인덱싱 상태, 자동 태그 생성 상태 등을 초기화합니다.
+    RAG 엔진, 인덱싱 상태, 태그 에디터 상태 등을 초기화합니다.
     """
     defaults = {
         "google_api_key": os.getenv("GOOGLE_API_KEY", ""),
@@ -67,11 +71,13 @@ def _init_session_state() -> None:
         "generated_results": {},       # {질문 텍스트: 생성된 답변}
         "fillable_cells": [],          # FillableCell 목록
         "cell_fills": {},              # {(ti,ri,ci): 답변} — 최종 셀 채우기용
-        # 자동 태그 생성 관련
+        # 태그 에디터 관련
         "tag_gen_cells": [],           # list[TaggableCell]
         "tag_gen_mappings": [],        # list[CellTagMapping]
-        "tag_gen_template_path": None, # 분석 중인 템플릿 경로
-        "tag_gen_hospital_id": None,   # 분석 중인 병원 ID
+        "tag_editor_active": False,    # 태그 에디터 패널 표시 여부
+        "tag_editor_hospital_id": None,  # 현재 편집 중인 병원 ID
+        "tag_editor_template_path": None,  # 편집 중인 템플릿 경로
+        "tag_editor_is_reedit": False,  # True = 기존 태그 재편집 모드
     }
     for key, val in defaults.items():
         if key not in st.session_state:
@@ -82,6 +88,88 @@ _init_session_state()
 
 TEMPLATES_DIR = Path("templates")
 TEMPLATES_DIR.mkdir(exist_ok=True)
+
+# ───────────────────────────── 태그 에디터 헬퍼 함수 ─────────────────────────────
+
+
+def _build_cells_from_tagged_doc(doc_path: Path) -> tuple[list[TaggableCell], dict]:
+    """이미 태그된 .docx에서 {{key}} 셀 추출.
+
+    재편집 모드에서 기존 태그 키를 selectbox 기본값으로 사용하기 위함.
+
+    Args:
+        doc_path: 태그된 .docx 파일 경로
+
+    Returns:
+        (TaggableCell 목록, {(ti, ri, ci): placeholder_key 매핑})
+    """
+    doc = Document(str(doc_path))
+    cells = []
+    key_map = {}
+    placeholder_pattern = re.compile(r"\{\{(\w+)\}\}")
+
+    for ti, table in enumerate(doc.tables):
+        for ri, row in enumerate(table.rows):
+            seen = set()
+            for ci, cell in enumerate(row.cells):
+                # 병합 셀 중복 제거
+                if id(cell._tc) in seen:
+                    continue
+                seen.add(id(cell._tc))
+
+                text = cell.text.strip()
+                matches = placeholder_pattern.findall(text)
+
+                if matches:
+                    key = matches[0]
+                    key_map[(ti, ri, ci)] = key
+
+                    # cell_type 판별
+                    if text == f"{{{{{key}}}}}":
+                        cell_type = CellType.EMPTY
+                        question = ""
+                    else:
+                        cell_type = CellType.LABEL_ONLY
+                        question = text.replace(f"{{{{{key}}}}}", "").strip()
+
+                    cells.append(TaggableCell(
+                        table_index=ti,
+                        row_index=ri,
+                        cell_index=ci,
+                        question=question or text,
+                        current_text=text,
+                        cell_type=cell_type,
+                    ))
+
+    return cells, key_map
+
+
+def _strip_all_placeholder_tags(doc_path: Path) -> bytes:
+    """재편집 저장 시 기존 {{key}} 모두 제거한 bytes 반환.
+
+    insert_placeholder_tags() 호출 전 파일에 기록하여 이중 태그 방지.
+
+    Args:
+        doc_path: .docx 파일 경로
+
+    Returns:
+        태그 제거된 .docx 파일의 bytes
+    """
+    doc = Document(str(doc_path))
+    placeholder_pattern = re.compile(r"\{\{\w+\}\}")
+
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                for para in cell.paragraphs:
+                    for run in para.runs:
+                        if placeholder_pattern.search(run.text):
+                            run.text = placeholder_pattern.sub("", run.text)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 
 # ───────────────────────────── 사이드바 ─────────────────────────────
@@ -149,8 +237,8 @@ with st.sidebar:
             st.session_state.auto_mapping_done = False
             st.session_state.field_mapping = []
 
-        mode_label = "수동 태그 ({{}})" if new_hospital.get("mode") == "manual" else "AI 자동 인식"
-        st.caption(f"모드: **{mode_label}**")
+        is_ready = new_hospital.get("mode") == "manual"
+        st.caption("상태: **준비됨** ✅" if is_ready else "상태: **태그 설정 필요** ⚠️")
     else:
         st.info("등록된 병원이 없습니다.\n\n**병원 양식 관리** 탭에서 추가하세요.")
         st.session_state.selected_hospital = None
@@ -365,10 +453,47 @@ with tab_hospitals:
 
     if display_list:
         for h in display_list:
-            col_name, col_mode, col_file, col_del = st.columns([3, 1.5, 2, 1])
+            col_name, col_status, col_file, col_edit, col_del = st.columns([3, 1.5, 2, 1.2, 1])
+
             col_name.write(f"**{h['name']}**")
-            col_mode.write("수동" if h.get("mode") == "manual" else "AI 자동")
+
+            # 상태 배지
+            is_ready = h.get("mode") == "manual"
+            if is_ready:
+                col_status.success("✅ 준비됨")
+            else:
+                col_status.warning("⚠️ 태그 필요")
+
             col_file.write(f"`{h['template_file']}`")
+
+            # 재편집 버튼 (준비됨 상태일 때만)
+            if is_ready:
+                if col_edit.button("태그 재편집", key=f"reedit_{h['id']}"):
+                    target_path = TEMPLATES_DIR / h["template_file"]
+                    cells, existing_key_map = _build_cells_from_tagged_doc(target_path)
+                    # synthetic mapping 생성
+                    synthetic_mappings = [
+                        CellTagMapping(
+                            table_index=c.table_index,
+                            row_index=c.row_index,
+                            cell_index=c.cell_index,
+                            question=c.question,
+                            placeholder_key=existing_key_map.get(
+                                (c.table_index, c.row_index, c.cell_index), "unknown"
+                            ),
+                            confidence="높음",
+                        )
+                        for c in cells
+                    ]
+                    st.session_state.tag_gen_cells = cells
+                    st.session_state.tag_gen_mappings = synthetic_mappings
+                    st.session_state.tag_editor_active = True
+                    st.session_state.tag_editor_hospital_id = h["id"]
+                    st.session_state.tag_editor_template_path = str(target_path)
+                    st.session_state.tag_editor_is_reedit = True
+                    st.rerun()
+
+            # 삭제 버튼
             if col_del.button("삭제", key=f"del_{h['id']}"):
                 # 병원 목록에서 제거
                 h_data["hospitals"] = [x for x in h_data["hospitals"] if x["id"] != h["id"]]
@@ -388,41 +513,27 @@ with tab_hospitals:
     # ── 새 병원 추가 ──
     st.subheader("➕ 새 병원 추가")
 
-    with st.form("add_hospital_form", clear_on_submit=True):
-        hospital_name = st.text_input(
-            "병원 이름 *",
-            placeholder="예: 서울대학교병원",
-        )
+    hospital_name_input = st.text_input(
+        "병원 이름 *",
+        placeholder="예: 서울대학교병원",
+        key="new_hospital_name",
+    )
 
-        template_file = st.file_uploader(
-            "병원 양식 파일 업로드 * (.docx)",
-            type=["docx"],
-            help="병원에서 요구하는 DC 신청 양식 Word 파일을 업로드하세요.",
-        )
+    template_file_input = st.file_uploader(
+        "병원 양식 파일 업로드 * (.docx)",
+        type=["docx"],
+        key="new_hospital_file",
+        help="병원에서 요구하는 DC 신청 양식 Word 파일을 업로드하세요.",
+    )
 
-        mode = st.radio(
-            "양식 처리 방식",
-            options=["auto", "manual"],
-            format_func=lambda x: (
-                "AI 자동 인식 — 원본 양식 그대로 업로드. AI가 항목을 자동으로 파악합니다. (권장)"
-                if x == "auto"
-                else "수동 태그 — 양식에 {{placeholder}} 태그를 직접 삽입한 경우 선택"
-            ),
-            help="AI 자동 인식 모드를 권장합니다.",
-        )
-
-        submitted = st.form_submit_button("병원 등록", type="primary")
-
-    if submitted:
-        if not hospital_name:
+    if st.button("병원 등록", type="primary", key="register_hospital_btn"):
+        if not hospital_name_input:
             st.error("병원 이름을 입력하세요.")
-        elif not template_file:
+        elif not template_file_input:
             st.error("양식 파일을 업로드하세요.")
         else:
             # 병원 ID 생성 (이름 → 영문 소문자 + 타임스탬프)
-            import re
-            import time
-            hospital_id = re.sub(r"[^a-zA-Z0-9가-힣]", "_", hospital_name).lower()
+            hospital_id = re.sub(r"[^a-zA-Z0-9가-힣]", "_", hospital_name_input).lower()
             hospital_id = f"{hospital_id}_{int(time.time())}"
 
             # 파일명: 병원ID.docx
@@ -431,183 +542,226 @@ with tab_hospitals:
 
             # 파일 저장
             with open(save_path, "wb") as f:
-                f.write(template_file.getbuffer())
+                f.write(template_file_input.getbuffer())
+
+            # 자동 감지: 기존 {{placeholder}} 태그 확인
+            detected_placeholders = find_placeholders_in_doc(save_path)
+            detected_mode = "manual" if detected_placeholders else "needs_tagging"
 
             # hospital_meta.json 업데이트
             new_entry = {
                 "id": hospital_id,
-                "name": hospital_name,
+                "name": hospital_name_input,
                 "template_file": template_filename,
                 "format": "docx",
-                "mode": mode,
+                "mode": detected_mode,
                 "field_mapping": None,
             }
             h_data["hospitals"].append(new_entry)
             _save_json(HOSPITAL_META_PATH, h_data)
 
-            st.success(f"✅ **{hospital_name}** 등록 완료! 사이드바에서 선택하여 사용하세요.")
-            st.rerun()
+            if detected_mode == "manual":
+                # 태그가 이미 있음 — 완료
+                st.success(
+                    f"✅ **{hospital_name_input}** 등록 완료! "
+                    f"{{{{placeholder}}}} 태그 {len(detected_placeholders)}개 발견. "
+                    f"사이드바에서 선택하여 사용하세요."
+                )
+                # 폼 리셋
+                st.session_state.new_hospital_name = ""
+                st.session_state.new_hospital_file = None
+                st.rerun()
+            else:
+                # 태그 없음 — 태그 에디터 자동 활성화
+                with st.spinner("양식 분석 중..."):
+                    cells = detect_taggable_cells(save_path)
+                st.session_state.tag_gen_cells = cells
+                st.session_state.tag_gen_mappings = []
+                st.session_state.tag_editor_active = True
+                st.session_state.tag_editor_hospital_id = hospital_id
+                st.session_state.tag_editor_template_path = str(save_path)
+                st.session_state.tag_editor_is_reedit = False
+                st.rerun()
 
     st.divider()
 
-    # ── 자동 태그 생성 ──
-    st.subheader("🏷️ 자동 태그 생성")
-    st.caption(
-        "원본 양식을 AI로 분석하여 각 항목에 {{placeholder}} 태그를 자동 삽입합니다. "
-        "태그 삽입 후 '문서 생성' 탭에서 사용할 수 있습니다."
-    )
+    # ── 인라인 태그 에디터 패널 ──
+    if st.session_state.tag_editor_active:
+        st.divider()
 
-    auto_hospitals = [h for h in display_list if h.get("mode") == "auto"]
-
-    if not auto_hospitals:
-        st.info("자동 태그 생성 대상 병원이 없습니다. 'AI 자동 인식' 모드로 등록된 병원만 대상입니다.")
-    else:
-        tag_target_names = [h["name"] + f" ({h['template_file']})" for h in auto_hospitals]
-        tag_target_idx = st.selectbox(
-            "태그 생성할 병원 선택",
-            options=range(len(auto_hospitals)),
-            format_func=lambda i: tag_target_names[i],
-            key="tag_gen_hospital_select",
+        # 현재 편집 중인 병원 찾기
+        editor_hospital = next(
+            (h for h in display_list if h["id"] == st.session_state.tag_editor_hospital_id),
+            None,
         )
-        target_hospital = auto_hospitals[tag_target_idx]
-        target_template_path = TEMPLATES_DIR / target_hospital["template_file"]
 
-        col_analyze, col_reset = st.columns([1, 1])
+        if editor_hospital is None:
+            st.error("병원을 찾을 수 없습니다.")
+        else:
+            # 헤더
+            if st.session_state.tag_editor_is_reedit:
+                st.subheader(f"🏷️ 태그 재편집: {editor_hospital['name']}")
+            else:
+                st.subheader(f"🏷️ 태그 설정: {editor_hospital['name']}")
+                st.info("업로드된 양식에서 태그를 찾지 못했습니다. 아래에서 각 셀에 적합한 항목을 지정하세요.")
 
-        with col_analyze:
-            if st.button("🔍 양식 분석", help="양식의 빈 셀과 라벨 셀을 탐지합니다"):
-                with st.spinner("양식 구조 분석 중..."):
-                    cells = detect_taggable_cells(target_template_path)
-                    st.session_state.tag_gen_cells = cells
-                    st.session_state.tag_gen_mappings = []
-                    st.session_state.tag_gen_template_path = str(target_template_path)
-                    st.session_state.tag_gen_hospital_id = target_hospital["id"]
-                st.success(f"{len(cells)}개 후보 셀 탐지 완료")
+            tag_cells: list[TaggableCell] = st.session_state.tag_gen_cells
 
-        with col_reset:
-            if st.button("초기화", help="분석 결과를 초기화합니다"):
-                st.session_state.tag_gen_cells = []
-                st.session_state.tag_gen_mappings = []
-                st.session_state.tag_gen_template_path = None
-                st.session_state.tag_gen_hospital_id = None
-                st.rerun()
-
-        # 탐지된 셀 표시 + AI 매핑 버튼
-        tag_cells: list[TaggableCell] = st.session_state.tag_gen_cells
-        if tag_cells:
-            st.write(f"**{len(tag_cells)}개** 후보 셀이 탐지되었습니다.")
-
-            with st.expander("탐지된 셀 목록", expanded=False):
-                for c in tag_cells:
-                    type_label = "빈 셀" if c.cell_type == CellType.EMPTY else "라벨 셀"
-                    st.write(f"- T{c.table_index}R{c.row_index}C{c.cell_index} [{type_label}] — {c.question[:60]}")
-
-            tag_api_key = st.session_state.google_api_key
-            if not tag_api_key:
-                st.warning("Google API 키를 입력해야 AI 태그 매핑을 실행할 수 있습니다.")
-            elif st.button("🤖 자동 태그 생성", type="primary", key="gen_tags"):
-                with st.spinner("AI가 각 셀에 적합한 태그를 분석 중..."):
-                    # LLM 전용 RAGEngine 생성 (vectorstore 불필요)
-                    tag_engine = RAGEngine(vectorstore=None, api_key=tag_api_key)
-                    mappings = tag_engine.generate_cell_tags(
-                        cells=tag_cells,
-                        placeholder_queries=PLACEHOLDER_QUERIES,
-                    )
-                    st.session_state.tag_gen_mappings = mappings
-                st.success(f"{len(mappings)}개 셀 태그 매핑 완료")
-
-        # 매핑 결과 미리보기 + 편집
-        tag_mappings: list[CellTagMapping] = st.session_state.tag_gen_mappings
-        if tag_mappings and tag_cells:
-            st.write("**태그 매핑 결과** — 아래에서 수정 후 '태그 삽입 확정'을 클릭하세요.")
-
-            all_keys = ["(건너뜀)"] + sorted(PLACEHOLDER_QUERIES.keys())
-            confidence_emoji = {"높음": "✅", "중간": "⚠️", "낮음": "❌"}
-
-            cell_lookup: dict[tuple[int, int, int], TaggableCell] = {
-                (c.table_index, c.row_index, c.cell_index): c for c in tag_cells
-            }
-
-            edited_assignments: list[tuple[TaggableCell, str]] = []
-
-            for i, m in enumerate(tag_mappings):
-                coord = (m.table_index, m.row_index, m.cell_index)
-                cell = cell_lookup.get(coord)
-                if cell is None:
-                    continue
-
-                emoji = confidence_emoji.get(m.confidence, "❓")
-                label = f"{emoji} T{m.table_index}R{m.row_index}C{m.cell_index} | {m.question[:40]}"
-
-                default_idx = (
-                    all_keys.index(m.placeholder_key)
-                    if m.placeholder_key in all_keys
-                    else 0
-                )
-
-                selected_key = st.selectbox(
-                    label,
-                    options=all_keys,
-                    index=default_idx,
-                    key=f"tag_sel_{i}",
-                )
-
-                if selected_key != "(건너뜀)":
-                    edited_assignments.append((cell, selected_key))
-                    # 미리보기 텍스트
-                    if cell.cell_type == CellType.LABEL_ONLY:
-                        preview = f"{cell.current_text.rstrip()} {{{{{selected_key}}}}}"
+            if not tag_cells:
+                st.warning("태그 가능한 셀을 찾지 못했습니다. 양식에 테이블이 없거나 이미 모두 채워져 있을 수 있습니다.")
+            else:
+                # AI 자동 채우기 버튼 (선택적)
+                tag_api_key = st.session_state.google_api_key
+                col_ai, col_spacer = st.columns([2, 5])
+                with col_ai:
+                    if not tag_api_key:
+                        st.caption("AI 자동 채우기를 사용하려면 사이드바에서 API 키를 입력하세요.")
                     else:
-                        preview = f"{{{{{selected_key}}}}}"
-                    st.caption(f"미리보기: `{preview}`")
+                        if st.button(
+                            "🤖 AI 자동 채우기",
+                            key="ai_fill_tags",
+                            help="AI가 각 셀에 적합한 태그를 분석하여 제안합니다.",
+                        ):
+                            with st.spinner("AI가 태그를 분석 중..."):
+                                tag_engine = RAGEngine(vectorstore=None, api_key=tag_api_key)
+                                mappings = tag_engine.generate_cell_tags(
+                                    cells=tag_cells,
+                                    placeholder_queries=PLACEHOLDER_QUERIES,
+                                )
+                                st.session_state.tag_gen_mappings = mappings
+                            st.rerun()
 
-            st.divider()
+                # selectbox 옵션 및 AI 추천 매핑
+                all_keys = ["(미지정)"] + sorted(PLACEHOLDER_QUERIES.keys())
+                ai_lookup = {}
+                for m in st.session_state.tag_gen_mappings:
+                    if m.placeholder_key not in ("unknown", ""):
+                        ai_lookup[(m.table_index, m.row_index, m.cell_index)] = m.placeholder_key
 
-            if edited_assignments:
-                # 미리보기 다운로드
-                with st.expander("태그된 템플릿 미리보기 다운로드 (저장 전 확인)"):
-                    preview_bytes = insert_placeholder_tags(
-                        st.session_state.tag_gen_template_path,
-                        edited_assignments,
-                    )
-                    st.download_button(
-                        label="미리보기 다운로드",
-                        data=preview_bytes,
-                        file_name=f"tagged_preview_{target_hospital['template_file']}",
-                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        key="tag_preview_dl",
-                    )
+                # 각 셀 편집
+                edited_assignments: list[tuple[TaggableCell, str]] = []
+                st.write("**셀별 태그 지정**")
 
-                if st.button("✅ 태그 삽입 확정 및 저장", type="primary", key="confirm_tags"):
-                    with st.spinner("태그 삽입 중..."):
-                        tagged_bytes = insert_placeholder_tags(
-                            st.session_state.tag_gen_template_path,
+                for i, cell in enumerate(tag_cells):
+                    coord = (cell.table_index, cell.row_index, cell.cell_index)
+                    col_loc, col_label, col_select, col_preview = st.columns([1.5, 3, 2.5, 3])
+
+                    with col_loc:
+                        st.caption(f"T{cell.table_index}R{cell.row_index}C{cell.cell_index}")
+                    with col_label:
+                        st.write(cell.question[:50] if cell.question else "(라벨 없음)")
+                    with col_select:
+                        ai_suggestion = ai_lookup.get(coord, "")
+                        default_idx = all_keys.index(ai_suggestion) if ai_suggestion in all_keys else 0
+
+                        selected = st.selectbox(
+                            "태그",
+                            options=all_keys,
+                            index=default_idx,
+                            key=f"tag_sel_{i}",
+                            label_visibility="collapsed",
+                        )
+                    with col_preview:
+                        if selected != "(미지정)":
+                            if cell.cell_type == CellType.LABEL_ONLY:
+                                preview = f"`{cell.current_text.rstrip()} {{{{{selected}}}}}`"
+                            else:
+                                preview = f"`{{{{{selected}}}}}`"
+                            st.caption(preview)
+                        else:
+                            st.caption("—")
+
+                    if selected != "(미지정)":
+                        edited_assignments.append((cell, selected))
+
+                st.divider()
+
+                # 하단 버튼
+                col_save, col_preview_dl, col_cancel = st.columns([2, 2, 1])
+
+                with col_preview_dl:
+                    if edited_assignments:
+                        preview_bytes = insert_placeholder_tags(
+                            st.session_state.tag_editor_template_path,
                             edited_assignments,
                         )
+                        st.download_button(
+                            label="미리보기 다운로드",
+                            data=preview_bytes,
+                            file_name=f"tagged_preview_{editor_hospital['template_file']}",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            key="tag_preview_dl",
+                        )
 
-                    # 원본 위치에 저장
-                    tag_save_path = Path(st.session_state.tag_gen_template_path)
-                    with open(tag_save_path, "wb") as f:
-                        f.write(tagged_bytes)
+                with col_save:
+                    save_disabled = len(edited_assignments) == 0
+                    if st.button(
+                        "✅ 저장",
+                        type="primary",
+                        key="confirm_tags",
+                        disabled=save_disabled,
+                        help="최소 1개 이상의 태그를 지정해야 합니다." if save_disabled else "",
+                    ):
+                        with st.spinner("태그 삽입 중..."):
+                            if st.session_state.tag_editor_is_reedit:
+                                # 재편집: 기존 태그 제거 후 삽입
+                                cleaned = _strip_all_placeholder_tags(
+                                    Path(st.session_state.tag_editor_template_path)
+                                )
+                                with open(st.session_state.tag_editor_template_path, "wb") as f:
+                                    f.write(cleaned)
 
-                    # hospital_meta.json 업데이트: mode → "manual"
-                    target_id = st.session_state.tag_gen_hospital_id
-                    for h in h_data["hospitals"]:
-                        if h["id"] == target_id:
-                            h["mode"] = "manual"
-                            break
-                    _save_json(HOSPITAL_META_PATH, h_data)
+                            tagged_bytes = insert_placeholder_tags(
+                                st.session_state.tag_editor_template_path,
+                                edited_assignments,
+                            )
 
-                    # session state 정리
-                    st.session_state.tag_gen_cells = []
-                    st.session_state.tag_gen_mappings = []
-                    st.session_state.tag_gen_template_path = None
-                    st.session_state.tag_gen_hospital_id = None
+                        # 파일 저장
+                        with open(st.session_state.tag_editor_template_path, "wb") as f:
+                            f.write(tagged_bytes)
 
-                    # 선택된 병원의 mode도 업데이트
-                    if (st.session_state.selected_hospital
-                            and st.session_state.selected_hospital.get("id") == target_id):
-                        st.session_state.selected_hospital["mode"] = "manual"
+                        # hospital_meta.json 업데이트: mode → "manual"
+                        target_id = st.session_state.tag_editor_hospital_id
+                        for h in h_data["hospitals"]:
+                            if h["id"] == target_id:
+                                h["mode"] = "manual"
+                                break
+                        _save_json(HOSPITAL_META_PATH, h_data)
 
-                    st.success("태그 삽입 완료! 이제 '문서 생성' 탭에서 사용 가능합니다.")
-                    st.rerun()
+                        # session state 정리
+                        st.session_state.tag_editor_active = False
+                        st.session_state.tag_editor_hospital_id = None
+                        st.session_state.tag_editor_template_path = None
+                        st.session_state.tag_editor_is_reedit = False
+                        st.session_state.tag_gen_cells = []
+                        st.session_state.tag_gen_mappings = []
+
+                        # 선택된 병원의 mode도 업데이트
+                        if (st.session_state.selected_hospital
+                                and st.session_state.selected_hospital.get("id") == target_id):
+                            st.session_state.selected_hospital["mode"] = "manual"
+
+                        st.success("✅ 태그 저장 완료! '문서 생성' 탭에서 사용 가능합니다.")
+                        st.rerun()
+
+                with col_cancel:
+                    if st.button("취소", key="cancel_tag_editor"):
+                        # 새 등록인 경우: 병원 + 파일 삭제
+                        if not st.session_state.tag_editor_is_reedit:
+                            target_id = st.session_state.tag_editor_hospital_id
+                            h_data["hospitals"] = [
+                                x for x in h_data["hospitals"] if x["id"] != target_id
+                            ]
+                            _save_json(HOSPITAL_META_PATH, h_data)
+                            tmpl = TEMPLATES_DIR / editor_hospital["template_file"]
+                            if tmpl.exists():
+                                tmpl.unlink()
+
+                        # 태그 에디터 초기화
+                        st.session_state.tag_editor_active = False
+                        st.session_state.tag_editor_hospital_id = None
+                        st.session_state.tag_editor_template_path = None
+                        st.session_state.tag_editor_is_reedit = False
+                        st.session_state.tag_gen_cells = []
+                        st.session_state.tag_gen_mappings = []
+                        st.rerun()
