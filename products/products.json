@@ -1,0 +1,10 @@
+{
+  "products": [
+    {
+      "id": "polivy",
+      "name": "Polivy (polatuzumab vedotin)",
+      "category": "항암제",
+      "master_data_dir": "products/polivy/master_data/"
+    }
+  ]
+}
