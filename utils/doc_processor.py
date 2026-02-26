@@ -398,7 +398,7 @@ class TaggableCell:
     cell_type: CellType
 
 
-_LABEL_SUFFIX_RE = re.compile(r".{1,30}[：:]\s*$")
+_LABEL_SUFFIX_RE = re.compile(r"^.+[：:)\)\]]\s*$")
 
 
 def _is_label_only_cell(text: str) -> bool:
