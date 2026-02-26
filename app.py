@@ -488,7 +488,7 @@ with tab_hospitals:
 
     if display_list:
         for h in display_list:
-            col_name, col_status, col_file, col_edit, col_del = st.columns([3, 1.5, 2, 1.2, 1])
+            col_name, col_status, col_file, col_dl, col_edit, col_del = st.columns([3, 1.5, 2, 1, 1.2, 1])
 
             col_name.write(f"**{h['name']}**")
 
@@ -504,6 +504,17 @@ with tab_hospitals:
                 col_status.warning("⚠️ 태그 필요")
 
             col_file.write(f"`{h['template_file']}`")
+
+            # 다운로드 버튼 (태그된 파일)
+            if tmpl_path.exists():
+                with open(tmpl_path, "rb") as dl_f:
+                    col_dl.download_button(
+                        label="⬇️",
+                        data=dl_f.read(),
+                        file_name=h["template_file"],
+                        mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        key=f"dl_{h['id']}",
+                    )
 
             # 재편집 버튼 (준비됨 상태일 때만)
             if is_ready:
