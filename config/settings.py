@@ -24,7 +24,7 @@ def _get_base_dir() -> Path:
 BASE_DIR = _get_base_dir()
 
 # LLM / Embedding
-GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.0-pro")
+GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.1-pro-preview")
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
 
 # RAG 청킹 설정
