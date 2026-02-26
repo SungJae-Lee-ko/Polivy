@@ -677,7 +677,7 @@ with tab_hospitals:
                 st.divider()
 
                 # 하단 버튼
-                col_save, col_preview_dl, col_cancel = st.columns([2, 2, 1])
+                col_save, col_skip, col_preview_dl, col_cancel = st.columns([1.5, 1.5, 1.5, 1])
 
                 with col_preview_dl:
                     if edited_assignments:
@@ -694,13 +694,11 @@ with tab_hospitals:
                         )
 
                 with col_save:
-                    save_disabled = len(edited_assignments) == 0
                     if st.button(
                         "✅ 저장",
                         type="primary",
                         key="confirm_tags",
-                        disabled=save_disabled,
-                        help="최소 1개 이상의 태그를 지정해야 합니다." if save_disabled else "",
+                        disabled=len(edited_assignments) == 0,
                     ):
                         with st.spinner("태그 삽입 중..."):
                             if st.session_state.tag_editor_is_reedit:
@@ -744,8 +742,25 @@ with tab_hospitals:
                         st.success("✅ 태그 저장 완료! '문서 생성' 탭에서 사용 가능합니다.")
                         st.rerun()
 
+                with col_skip:
+                    if st.button(
+                        "⏭️ 나중에 하기",
+                        key="skip_tags",
+                        help="태그 설정 없이 병원만 등록합니다. 나중에 '태그 재편집'으로 설정할 수 있습니다.",
+                    ):
+                        # 태그 없이 병원만 등록 (mode="needs_tagging" 유지)
+                        # 새 등록인 경우에만 hospital_meta.json 이미 저장됨
+                        st.session_state.tag_editor_active = False
+                        st.session_state.tag_editor_hospital_id = None
+                        st.session_state.tag_editor_template_path = None
+                        st.session_state.tag_editor_is_reedit = False
+                        st.session_state.tag_gen_cells = []
+                        st.session_state.tag_gen_mappings = []
+                        st.info("✅ 병원이 등록되었습니다. 나중에 '태그 재편집'으로 태그를 설정할 수 있습니다.")
+                        st.rerun()
+
                 with col_cancel:
-                    if st.button("취소", key="cancel_tag_editor"):
+                    if st.button("✖️ 취소", key="cancel_tag_editor"):
                         # 새 등록인 경우: 병원 + 파일 삭제
                         if not st.session_state.tag_editor_is_reedit:
                             target_id = st.session_state.tag_editor_hospital_id
