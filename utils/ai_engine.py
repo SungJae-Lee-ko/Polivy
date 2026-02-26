@@ -92,51 +92,40 @@ class CellTagMapping:
     confidence: str        # "높음" / "중간" / "낮음"
 
 
-_TAG_GENERATION_PROMPT = """당신은 병원 약제위원회(DC) 신청 양식 분석 전문가입니다.
-아래 양식 셀 목록과 사용 가능한 placeholder 태그 목록이 주어집니다.
-각 셀의 라벨을 보고, 가장 적합한 placeholder 키를 매핑하세요.
+_TAG_GENERATION_PROMPT = """병원 약제위원회(DC) 신청 양식의 각 셀을 분석하여, 가장 적합한 정보 필드를 매핑하세요.
 
-## DC 양식 일반적 섹션 (참고용)
-- 허가사항: 약물의 허가된 적응증, 용법용량, 투여기간
-- 신청사유: 약물 도입 필요 사유, 기존 치료의 한계
-- 효능: 임상시험 결과, 유효성 데이터
-- 안전성: 부작용, 주의사항, 금기, 이상반응
-- 비용: 약가, 경제성, 비용 대비 효과
-- 기타: 추가 장점, 편리성, 고려사항
-
-## 사용 가능한 Placeholder 태그 목록
-각 항목: "키": "이 태그가 채울 내용"
-{placeholder_descriptions}
+## DC 신청 양식의 핵심 정보 6가지 (최우선 매핑 대상)
+1. **indication_dosage** - 허가사항: 약물의 허가된 적응증, 용법용량, 투여방법, 투여기간
+2. **application_reason** - 신청사유: 이 약을 병원에 도입해야 하는 이유, 필요성, 배경
+3. **efficacy** - 효능/유효성: 임상시험 결과, 치료효과, 효과 데이터
+4. **safety** - 안전성: 부작용, 이상반응, 주의사항, 금기, 안전성 프로파일
+5. **cost_effectiveness** - 비용/경제성: 약가, 가격, 비용대비 효과, 경제성
+6. **other_considerations** - 기타: 위 5가지에 해당하지 않는 추가 정보 (장점, 편리성, 모니터링 등)
 
 ## 분석할 양식 셀 목록
-각 항목: cell_id | 라벨(질문)
 {cell_rows}
 
-## 매핑 우선순위 (반드시 아래 규칙에 따라 매핑)
-1. 셀 라벨이 "허가사항", "허가", "적응증", "용법용량" 포함 → "indication_dosage" 선택
-2. 셀 라벨이 "신청사유", "도입사유", "배경", "필요성" 포함 → "application_reason" 선택
-3. 셀 라벨이 "효능", "유효성", "임상", "효과", "결과" 포함 → "efficacy" 선택
-4. 셀 라벨이 "안전", "안전성", "부작용", "이상반응", "독성" 포함 → "safety" 선택
-5. 셀 라벨이 "비용", "경제성", "약가", "가격" 포함 → "cost_effectiveness" 선택
-6. 셀 라벨이 "기타", "고려사항", "주의점", "모니터링", "장점" 포함 → "other_considerations" 선택
-7. 위 패턴에 완전히 일치하지 않아도 셀 내용이 암시하는 의미상 가장 가까운 키를 선택하세요
-8. 정말 불가피한 경우만 "unknown"으로 설정하세요 (매우 드문 경우)
+## 사용 가능한 모든 Placeholder 키
+{placeholder_descriptions}
 
-## 응답 규칙
-- 반드시 아래 JSON 형식으로만 응답하세요.
-- placeholder_key는 반드시 위 목록에 있는 키만 사용하세요.
-- "unknown"은 정말 마지막 수단입니다. 반드시 "효능", "안전성", "비용", "기타" 중 하나와 매핑 가능한지 다시 생각하세요.
-- 모든 셀은 "unknown" 없이 반드시 유효한 placeholder_key를 가져야 합니다.
-- 확신도: "높음"(명확히 일치) / "중간"(의미상 대략 일치) / "낮음"(불확실하지만 최선의 선택)
+## 매핑 규칙
+- 각 셀의 라벨/질문을 읽고, 위 6가지 DC 핵심 정보 카테고리 중 가장 가까운 것을 선택하세요
+- 위 6가지 카테고리(indication_dosage, application_reason, efficacy, safety, cost_effectiveness, other_considerations)를 최우선으로 선택하세요
+- 만약 세부 필드(예: "efficacy" 카테고리 내 "clinical_results")가 더 정확하면, 그 세부 필드를 선택해도 됩니다
+- 매우 불명확한 경우에만 "unknown"을 사용하세요
 
+## JSON 응답 형식
 ```json
 {{
   "태그_매핑": [
     {{"cell_id": "T0R1C2", "placeholder_key": "efficacy", "확신도": "높음"}},
+    {{"cell_id": "T0R1C3", "placeholder_key": "safety", "확신도": "중간"}},
     ...
   ]
 }}
-```"""
+```
+
+반드시 JSON만 출력하세요."""
 
 
 class RAGEngine:

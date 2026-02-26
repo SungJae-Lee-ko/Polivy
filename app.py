@@ -822,11 +822,20 @@ with tab_hospitals:
                                 )
 
                                 # AI 분석 결과로 자동 태그 삽입
+                                # unknown을 제외한 유효한 태그만 수집
                                 auto_assignments = [
                                     (c, m.placeholder_key)
                                     for c, m in zip(tag_cells, auto_mappings)
                                     if m.placeholder_key not in ("unknown", "")
                                 ]
+
+                                # 유효한 태그가 없는 경우, 모든 매핑(unknown 포함)을 반영
+                                # (사용자가 수동으로 수정할 수 있도록)
+                                if not auto_assignments:
+                                    auto_assignments = [
+                                        (c, m.placeholder_key if m.placeholder_key not in ("unknown", "") else "efficacy")
+                                        for c, m in zip(tag_cells, auto_mappings)
+                                    ]
 
                             if auto_assignments:
                                 with st.spinner("태그를 삽입 중..."):
