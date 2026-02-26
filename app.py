@@ -833,7 +833,7 @@ with tab_hospitals:
                                 # (사용자가 수동으로 수정할 수 있도록)
                                 if not auto_assignments:
                                     auto_assignments = [
-                                        (c, m.placeholder_key if m.placeholder_key not in ("unknown", "") else "efficacy")
+                                        (c, m.placeholder_key if m.placeholder_key not in ("unknown", "") else "효능")
                                         for c, m in zip(tag_cells, auto_mappings)
                                     ]
 
