@@ -1,11 +1,11 @@
 {
   "hospitals": [
     {
-      "id": "서울대학교병원_신약신청서1_1772068200",
+      "id": "서울대학교병원_신약신청서1_1772072513",
       "name": "서울대학교병원 신약신청서1",
-      "template_file": "서울대학교병원_신약신청서1_1772068200.docx",
+      "template_file": "서울대학교병원_신약신청서1_1772072513.docx",
       "format": "docx",
-      "mode": "manual",
+      "mode": "needs_tagging",
       "field_mapping": null
     }
   ]

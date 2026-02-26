@@ -481,7 +481,7 @@ with tab_hospitals:
 
     if display_list:
         for h in display_list:
-            col_name, col_status, col_file, col_dl, col_edit, col_del = st.columns([3, 1.5, 2, 1, 1.2, 1])
+            col_name, col_status, col_file, col_dl, col_del = st.columns([3, 1.5, 3, 1, 1])
 
             col_name.write(f"**{h['name']}**")
 
@@ -508,42 +508,6 @@ with tab_hospitals:
                         mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                         key=f"dl_{h['id']}",
                     )
-
-            # AI 태그 분석 버튼 (태그 필요 상태일 때)
-            if not is_ready:
-                tag_api_key = st.session_state.google_api_key
-                if tag_api_key and col_edit.button("AI 태그 분석", key=f"retag_{h['id']}"):
-                    target_path = TEMPLATES_DIR / h["template_file"]
-                    with st.spinner("🤖 AI가 태그를 분석 중..."):
-                        cells = detect_taggable_cells(target_path)
-                        # LABEL_ONLY 셀만 AI 태그 대상 (라벨 뒤에 직접 태그 삽입)
-                        label_cells = [c for c in cells if c.cell_type == CellType.LABEL_ONLY]
-                        if label_cells:
-                            tag_engine = RAGEngine(vectorstore=None, api_key=tag_api_key)
-                            auto_mappings = tag_engine.generate_cell_tags(
-                                cells=label_cells,
-                                placeholder_queries=PLACEHOLDER_QUERIES,
-                            )
-                            auto_assignments = [
-                                (c, m.placeholder_key)
-                                for c, m in zip(label_cells, auto_mappings)
-                                if m.placeholder_key not in ("unknown", "")
-                            ]
-                            if auto_assignments:
-                                tagged_bytes = insert_placeholder_tags(str(target_path), auto_assignments)
-                                with open(target_path, "wb") as f:
-                                    f.write(tagged_bytes)
-                                for h_entry in h_data["hospitals"]:
-                                    if h_entry["id"] == h["id"]:
-                                        h_entry["mode"] = "manual"
-                                        break
-                                _save_json(HOSPITAL_META_PATH, h_data)
-                                st.success(f"✅ {len(auto_assignments)}개 태그 자동 삽입 완료!")
-                                st.rerun()
-                            else:
-                                st.warning("AI가 태그를 찾지 못했습니다.")
-                        else:
-                            st.warning("태그 가능한 셀을 찾지 못했습니다.")
 
             # 삭제 버튼
             if col_del.button("삭제", key=f"del_{h['id']}"):
@@ -637,7 +601,7 @@ with tab_hospitals:
                 if not tag_api_key:
                     st.warning(
                         f"⚠️ **{hospital_name_input}** 등록 완료 (태그 미설정). "
-                        f"API 키를 입력한 후, 병원 목록에서 'AI 태그 분석' 버튼을 눌러주세요."
+                        f"Google API 키를 입력한 후 다시 등록하거나, 직접 {{{{태그}}}}를 파일에 추가해주세요."
                     )
                     st.rerun()
                 else:
@@ -651,10 +615,16 @@ with tab_hospitals:
                                 cells=label_cells,
                                 placeholder_queries=PLACEHOLDER_QUERIES,
                             )
-                            auto_assignments = [
-                                (c, m.placeholder_key)
-                                for c, m in zip(label_cells, auto_mappings)
+                            # 좌표 기반 딕셔너리로 매핑 (순서 불일치 버그 해결)
+                            mapping_lookup = {
+                                (m.table_index, m.row_index, m.cell_index): m.placeholder_key
+                                for m in auto_mappings
                                 if m.placeholder_key not in ("unknown", "")
+                            }
+                            auto_assignments = [
+                                (c, mapping_lookup[(c.table_index, c.row_index, c.cell_index)])
+                                for c in label_cells
+                                if (c.table_index, c.row_index, c.cell_index) in mapping_lookup
                             ]
                             if auto_assignments:
                                 tagged_bytes = insert_placeholder_tags(str(save_path), auto_assignments)
@@ -673,7 +643,7 @@ with tab_hospitals:
                             else:
                                 st.warning(
                                     f"⚠️ **{hospital_name_input}** 등록 완료. "
-                                    f"AI가 태그를 찾지 못했습니다. 병원 목록에서 'AI 태그 분석'을 다시 시도하세요."
+                                    f"AI가 유효한 태그를 찾지 못했습니다. 직접 {{{{태그}}}}를 파일에 추가하거나, 다시 등록해주세요."
                                 )
                         else:
                             st.warning(
