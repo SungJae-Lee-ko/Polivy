@@ -516,15 +516,17 @@ with tab_hospitals:
                     target_path = TEMPLATES_DIR / h["template_file"]
                     with st.spinner("🤖 AI가 태그를 분석 중..."):
                         cells = detect_taggable_cells(target_path)
-                        if cells:
+                        # LABEL_ONLY 셀만 AI 태그 대상 (라벨 뒤에 직접 태그 삽입)
+                        label_cells = [c for c in cells if c.cell_type == CellType.LABEL_ONLY]
+                        if label_cells:
                             tag_engine = RAGEngine(vectorstore=None, api_key=tag_api_key)
                             auto_mappings = tag_engine.generate_cell_tags(
-                                cells=cells,
+                                cells=label_cells,
                                 placeholder_queries=PLACEHOLDER_QUERIES,
                             )
                             auto_assignments = [
                                 (c, m.placeholder_key)
-                                for c, m in zip(cells, auto_mappings)
+                                for c, m in zip(label_cells, auto_mappings)
                                 if m.placeholder_key not in ("unknown", "")
                             ]
                             if auto_assignments:
@@ -628,9 +630,6 @@ with tab_hospitals:
                     f"{{{{placeholder}}}} 태그 {len(detected_placeholders)}개 발견. "
                     f"사이드바에서 선택하여 사용하세요."
                 )
-                # 폼 리셋
-                st.session_state.new_hospital_name = ""
-                st.session_state.new_hospital_file = None
                 st.rerun()
             else:
                 # 태그 없음 — AI 자동 분석 후 저장
@@ -644,15 +643,17 @@ with tab_hospitals:
                 else:
                     with st.spinner("🤖 AI가 양식을 분석하고 태그를 자동 삽입 중..."):
                         cells = detect_taggable_cells(save_path)
-                        if cells:
+                        # LABEL_ONLY 셀만 AI 태그 대상
+                        label_cells = [c for c in cells if c.cell_type == CellType.LABEL_ONLY]
+                        if label_cells:
                             tag_engine = RAGEngine(vectorstore=None, api_key=tag_api_key)
                             auto_mappings = tag_engine.generate_cell_tags(
-                                cells=cells,
+                                cells=label_cells,
                                 placeholder_queries=PLACEHOLDER_QUERIES,
                             )
                             auto_assignments = [
                                 (c, m.placeholder_key)
-                                for c, m in zip(cells, auto_mappings)
+                                for c, m in zip(label_cells, auto_mappings)
                                 if m.placeholder_key not in ("unknown", "")
                             ]
                             if auto_assignments:
@@ -679,8 +680,6 @@ with tab_hospitals:
                                 f"⚠️ **{hospital_name_input}** 등록 완료. "
                                 f"양식에서 태그 가능한 셀을 찾지 못했습니다."
                             )
-                    st.session_state.new_hospital_name = ""
-                    st.session_state.new_hospital_file = None
                     st.rerun()
 
     st.divider()
