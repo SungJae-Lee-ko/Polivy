@@ -744,20 +744,73 @@ with tab_hospitals:
 
                 with col_skip:
                     if st.button(
-                        "⏭️ 나중에 하기",
+                        "⏭️ AI 자동 분석 후 저장",
                         key="skip_tags",
-                        help="태그 설정 없이 병원만 등록합니다. 나중에 '태그 재편집'으로 설정할 수 있습니다.",
+                        help="AI가 자동으로 태그를 분석하여 저장합니다.",
                     ):
-                        # 태그 없이 병원만 등록 (mode="needs_tagging" 유지)
-                        # 새 등록인 경우에만 hospital_meta.json 이미 저장됨
-                        st.session_state.tag_editor_active = False
-                        st.session_state.tag_editor_hospital_id = None
-                        st.session_state.tag_editor_template_path = None
-                        st.session_state.tag_editor_is_reedit = False
-                        st.session_state.tag_gen_cells = []
-                        st.session_state.tag_gen_mappings = []
-                        st.info("✅ 병원이 등록되었습니다. 나중에 '태그 재편집'으로 태그를 설정할 수 있습니다.")
-                        st.rerun()
+                        tag_api_key = st.session_state.google_api_key
+                        if not tag_api_key:
+                            st.error("API 키를 입력해야 AI 자동 분석을 진행할 수 있습니다. 사이드바에서 입력하세요.")
+                        else:
+                            with st.spinner("🤖 AI가 태그를 자동으로 분석 중... (이 과정은 몇 초 걸릴 수 있습니다)"):
+                                # AI 태그 분석
+                                tag_engine = RAGEngine(vectorstore=None, api_key=tag_api_key)
+                                auto_mappings = tag_engine.generate_cell_tags(
+                                    cells=tag_cells,
+                                    placeholder_queries=PLACEHOLDER_QUERIES,
+                                )
+
+                                # AI 분석 결과로 자동 태그 삽입
+                                auto_assignments = [
+                                    (c, m.placeholder_key)
+                                    for c, m in zip(tag_cells, auto_mappings)
+                                    if m.placeholder_key not in ("unknown", "")
+                                ]
+
+                            if auto_assignments:
+                                with st.spinner("태그를 삽입 중..."):
+                                    if st.session_state.tag_editor_is_reedit:
+                                        # 재편집: 기존 태그 제거 후 삽입
+                                        cleaned = _strip_all_placeholder_tags(
+                                            Path(st.session_state.tag_editor_template_path)
+                                        )
+                                        with open(st.session_state.tag_editor_template_path, "wb") as f:
+                                            f.write(cleaned)
+
+                                    tagged_bytes = insert_placeholder_tags(
+                                        st.session_state.tag_editor_template_path,
+                                        auto_assignments,
+                                    )
+
+                                # 파일 저장
+                                with open(st.session_state.tag_editor_template_path, "wb") as f:
+                                    f.write(tagged_bytes)
+
+                                # hospital_meta.json 업데이트: mode → "manual"
+                                target_id = st.session_state.tag_editor_hospital_id
+                                for h in h_data["hospitals"]:
+                                    if h["id"] == target_id:
+                                        h["mode"] = "manual"
+                                        break
+                                _save_json(HOSPITAL_META_PATH, h_data)
+
+                                # session state 정리
+                                st.session_state.tag_editor_active = False
+                                st.session_state.tag_editor_hospital_id = None
+                                st.session_state.tag_editor_template_path = None
+                                st.session_state.tag_editor_is_reedit = False
+                                st.session_state.tag_gen_cells = []
+                                st.session_state.tag_gen_mappings = []
+
+                                # 선택된 병원의 mode도 업데이트
+                                if (st.session_state.selected_hospital
+                                        and st.session_state.selected_hospital.get("id") == target_id):
+                                    st.session_state.selected_hospital["mode"] = "manual"
+
+                                st.success(f"✅ AI가 {len(auto_assignments)}개 셀에 태그를 자동 삽입했습니다! 이제 '문서 생성' 탭에서 사용 가능합니다.")
+                                st.rerun()
+                            else:
+                                st.warning("AI가 분석 가능한 태그를 찾지 못했습니다. 수동으로 태그를 설정해주세요.")
 
                 with col_cancel:
                     if st.button("✖️ 취소", key="cancel_tag_editor"):
