@@ -69,6 +69,7 @@ def _init_session_state() -> None:
         "indexed_files": [],
         "indexed_chunks": 0,
         "generated_results": {},       # {질문 텍스트: 생성된 답변}
+        "generated_sources": {},       # {질문 텍스트: 소스 목록}
         "fillable_cells": [],          # FillableCell 목록
         "cell_fills": {},              # {(ti,ri,ci): 답변} — 최종 셀 채우기용
         # 태그 에디터 관련
@@ -359,6 +360,7 @@ with tab_generate:
                 progress = st.progress(0)
                 status = st.empty()
                 replacements: dict[str, str] = {}
+                sources_info: dict[str, list[str]] = {}
 
                 for i, key in enumerate(placeholders):
                     query_text = PLACEHOLDER_QUERIES.get(key, key)
@@ -369,16 +371,30 @@ with tab_generate:
                             custom_query=query_text,
                         )
                         replacements[key] = result.answer
+                        sources_info[key] = result.sources
                     except Exception as e:
                         replacements[key] = f"[생성 실패: {e}]"
+                        sources_info[key] = []
                         logger.error("질의 실패: %s — %s", key, e)
                     progress.progress((i + 1) / len(placeholders))
 
                 st.session_state.generated_results = replacements
+                st.session_state.generated_sources = sources_info
 
                 status.empty()
                 progress.empty()
-                st.success(f"문서 생성 완료! ({len(replacements)}개 항목)")
+
+                # 생성 결과 요약
+                success_count = sum(1 for v in replacements.values() if not v.startswith("[생성 실패"))
+                empty_count = sum(1 for v in replacements.values() if v.strip() in ("", "해당 정보 없음"))
+                fail_count = sum(1 for v in replacements.values() if v.startswith("[생성 실패"))
+
+                if fail_count == 0 and empty_count == 0:
+                    st.success(f"✅ 문서 생성 완료! ({success_count}개 항목 모두 성공)")
+                elif fail_count > 0:
+                    st.warning(f"⚠️ 문서 생성 완료 — 성공: {success_count}개, 실패: {fail_count}개, 정보 없음: {empty_count}개")
+                else:
+                    st.info(f"📄 문서 생성 완료 — 성공: {success_count}개, 정보 없음: {empty_count}개")
 
     st.divider()
 
@@ -390,12 +406,24 @@ with tab_generate:
     if not generated:
         st.info("Step 2에서 문서를 생성하세요.")
     else:
+        sources_data: dict = st.session_state.get("generated_sources", {})
         st.write(f"**{len(generated)}개 항목** 생성 완료. 내용을 확인하고 필요시 수정하세요.")
 
         edited_results: dict[str, str] = {}
         for i, (key, answer) in enumerate(generated.items()):
             query_desc = PLACEHOLDER_QUERIES.get(key, key)[:40]
-            with st.expander(f"📄 {key} — {query_desc}", expanded=False):
+
+            # 품질 지표
+            if answer.startswith("[생성 실패"):
+                quality = "❌ 실패"
+            elif answer.strip() in ("", "해당 정보 없음"):
+                quality = "⚠️ 정보 없음"
+            elif len(answer.strip()) < 10:
+                quality = "⚠️ 짧음"
+            else:
+                quality = "✅"
+
+            with st.expander(f"{quality} {key} — {query_desc}", expanded=(quality != "✅")):
                 edited = st.text_area(
                     "내용",
                     value=answer,
@@ -404,6 +432,13 @@ with tab_generate:
                     label_visibility="collapsed",
                 )
                 edited_results[key] = edited
+
+                # 소스 정보 표시
+                key_sources = sources_data.get(key, [])
+                if key_sources:
+                    st.caption(f"📚 참조 소스: {', '.join(key_sources)}")
+                elif quality == "✅":
+                    st.caption("📚 참조 소스: (정보 없음)")
 
         st.session_state.generated_results = edited_results
 
@@ -457,9 +492,13 @@ with tab_hospitals:
 
             col_name.write(f"**{h['name']}**")
 
-            # 상태 배지
+            # 상태 배지 + 태그 수 표시
             is_ready = h.get("mode") == "manual"
-            if is_ready:
+            tmpl_path = TEMPLATES_DIR / h["template_file"]
+            if is_ready and tmpl_path.exists():
+                tag_count = len(find_placeholders_in_doc(tmpl_path))
+                col_status.success(f"✅ 태그 {tag_count}개")
+            elif is_ready:
                 col_status.success("✅ 준비됨")
             else:
                 col_status.warning("⚠️ 태그 필요")
@@ -505,6 +544,17 @@ with tab_hospitals:
                 if st.session_state.selected_hospital and st.session_state.selected_hospital.get("id") == h["id"]:
                     st.session_state.selected_hospital = None
                 st.rerun()
+
+            # 태그 진단 expander (준비됨 상태일 때)
+            if is_ready and tmpl_path.exists():
+                with st.expander(f"🔍 {h['name']} — 삽입된 태그 목록", expanded=False):
+                    tags = find_placeholders_in_doc(tmpl_path)
+                    if tags:
+                        for idx, tag_key in enumerate(tags, 1):
+                            query_desc = PLACEHOLDER_QUERIES.get(tag_key, "알 수 없는 키")
+                            st.write(f"{idx}. `{{{{{tag_key}}}}}` → {query_desc[:60]}")
+                    else:
+                        st.warning("태그를 찾지 못했습니다. 태그가 올바르게 삽입되었는지 확인하세요.")
     else:
         st.info("등록된 병원이 없습니다. 아래에서 새 병원을 추가하세요.")
 
