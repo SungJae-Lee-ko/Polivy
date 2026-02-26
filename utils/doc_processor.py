@@ -447,9 +447,9 @@ def detect_taggable_cells(doc_path: str | Path) -> list[TaggableCell]:
                 else:
                     empty_indices.append(ci)
 
-            if empty_indices and nonempty_indices:
-                # 패턴 A/B: 빈 셀이 있는 행 → 빈 셀이 태그 대상
-                question = " / ".join(cells_text[ci] for ci in nonempty_indices)
+            # 패턴 1: 빈 셀이 있는 경우 (라벨과 무관하게 처리)
+            if empty_indices:
+                question = " / ".join(cells_text[ci] for ci in nonempty_indices) if nonempty_indices else ""
                 for ci in empty_indices:
                     taggable.append(
                         TaggableCell(
@@ -461,23 +461,23 @@ def detect_taggable_cells(doc_path: str | Path) -> list[TaggableCell]:
                             cell_type=CellType.EMPTY,
                         )
                     )
-            elif nonempty_indices and not empty_indices:
-                # 패턴 C: 빈 셀이 없지만 라벨만 있는 셀 → 라벨 뒤에 태그 추가
-                label_only_indices = [
-                    ci for ci in nonempty_indices
-                    if _is_label_only_cell(cells_text[ci])
-                ]
-                for ci in label_only_indices:
-                    taggable.append(
-                        TaggableCell(
-                            table_index=ti,
-                            row_index=ri,
-                            cell_index=ci,
-                            question=cells_text[ci],
-                            current_text=cells_text[ci],
-                            cell_type=CellType.LABEL_ONLY,
-                        )
+
+            # 패턴 2: 라벨만 있는 셀 (독립적으로 실행 — 빈 셀 여부와 무관)
+            label_only_indices = [
+                ci for ci in nonempty_indices
+                if _is_label_only_cell(cells_text[ci])
+            ]
+            for ci in label_only_indices:
+                taggable.append(
+                    TaggableCell(
+                        table_index=ti,
+                        row_index=ri,
+                        cell_index=ci,
+                        question=cells_text[ci],
+                        current_text=cells_text[ci],
+                        cell_type=CellType.LABEL_ONLY,
                     )
+                )
 
     logger.info(
         "%s: %d개 태그 후보 셀 탐지 (테이블 %d개)",
@@ -516,7 +516,13 @@ def insert_placeholder_tags(
         if cell.cell_type == CellType.EMPTY:
             fills[coord] = tag
         elif cell.cell_type == CellType.LABEL_ONLY:
-            existing = cell.current_text.rstrip()
-            fills[coord] = f"{existing} {tag}"
+            # 원본 텍스트에서 공백을 보존하고 태그 추가
+            original = cell.current_text
+            # 세미콜론으로 끝나면 공백 추가 후 태그 삽입
+            if original.endswith(":") or original.endswith("："):
+                fills[coord] = f"{original} {tag}"
+            else:
+                # 다른 경우도 공백 추가 후 태그 삽입
+                fills[coord] = f"{original} {tag}"
 
     return fill_cells_to_bytes(doc_path, fills)
