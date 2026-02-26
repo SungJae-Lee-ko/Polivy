@@ -516,13 +516,8 @@ def insert_placeholder_tags(
         if cell.cell_type == CellType.EMPTY:
             fills[coord] = tag
         elif cell.cell_type == CellType.LABEL_ONLY:
-            # 원본 텍스트에서 공백을 보존하고 태그 추가
+            # 원본 텍스트(라벨) 뒤에 공백과 함께 태그 추가
             original = cell.current_text
-            # 세미콜론으로 끝나면 공백 추가 후 태그 삽입
-            if original.endswith(":") or original.endswith("："):
-                fills[coord] = f"{original} {tag}"
-            else:
-                # 다른 경우도 공백 추가 후 태그 삽입
-                fills[coord] = f"{original} {tag}"
+            fills[coord] = f"{original} {tag}"
 
     return fill_cells_to_bytes(doc_path, fills)
